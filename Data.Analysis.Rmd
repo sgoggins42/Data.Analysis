@@ -1,0 +1,210 @@
+---
+title: "Data.Analysis"
+author: "Shawn Goggins"
+date: "April 27, 2016"
+output: html_document
+---
+
+## 1. Read in data sets:    
+Datasets available at:    
+[https://github.com/sgoggins42/Data.Analysis.git](https://github.com/sgoggins42/Data.Analysis.git)    
+  - Land_SNPs: Allele calls for 803 Landraces over 6,152 SNPs    
+  - GeneticMap: Mapping information over SNPs    
+
+```{r}
+
+# Set working directory
+setwd("/Users/shawngoggins")
+
+# Import Landrace SNP Data
+#   SNP calls
+Land_SNPs <- read.delim("Data.Analysis/Land_6152_SNPs_AB.txt", stringsAsFactors=FALSE)
+#   SNP locations
+GeneticMap <- read.delim("Data.Analysis/GeneticMap_iSelect_9k.txt", stringsAsFactors=FALSE)
+
+```
+
+## 2. Find "closest" SNPs to my SNP of interest: X11_10380    
+
+```{r}
+
+# Find my SNP region
+Target.cm <- subset(x = GeneticMap, subset = GeneticMap$SNP == "X11_10380", select = "cm")
+
+# Get list of nearest SNPs (within 10cm both ways)
+forClosestSNPs <- function(data){
+  # Subset for chromosome 3H
+  All.3H <- subset(x = data, subset = data$Chro == "3H")
+  # Grab those within 3cm
+  Near.SNP <- subset(x = All.3H, 
+  subset = All.3H$cm > (Target.cm[[1]] - 3) & All.3H$cm < (Target.cm[[1]] + 3))
+  # Grab only SNP names and save them for a return value
+  Target.SNPs <- Near.SNP$SNP
+  return(SNPs = Target.SNPs)
+}
+
+# Save list to work environment
+  Target.SNPs <- data.frame(forClosestSNPs(data = GeneticMap))
+    colnames(Target.SNPs) <- "SNP"
+
+```
+
+## 3. Invert Genotype data so that SNPs can be selected on    
+
+```{r}
+    
+# Subset SNP genotypes for these Targets
+#   Invert dataset
+Genotype.matrix <- t(Land_SNPs)
+#   Save Sample names
+All.Samples <- Genotype.matrix[1,]
+#   Remove excess row
+Genotype.matrix <- Genotype.matrix[-1,]
+## 
+# Add accession names
+colnames(Genotype.matrix) <- All.Samples
+# Get all SNPs:
+All.SNPs <- data.frame(row.names(Genotype.matrix))
+
+```
+
+## 4. Get a new genotype matrix with only the SNPs that we have identified as near our SNP of interest.    
+
+```{r}
+
+# Add SNPs as a column for merging
+Genotype.matrix <- cbind(All.SNPs, Genotype.matrix)
+# Merge for matching SNPs
+Genotype.matrix <- merge(x = Genotype.matrix, y = Target.SNPs,
+                 by.x = "row.names.Genotype.matrix.",
+                 by.y = "SNP")
+
+# Name the column of SNPs that matched between files
+colnames(Genotype.matrix)[1] <- "SNP"
+# Make them a dataframe to conserve these Genotyped SNPs
+Genotyped.SNPs <- as.data.frame(Genotype.matrix$SNP)
+# Remove the column from the dataframe
+Genotype.matrix <- Genotype.matrix[,-1]
+# Replace the SNPs as the row names
+rownames(Genotype.matrix) <- Genotyped.SNPs$`Genotype.matrix$SNP`
+#### Dataset is now only SNPs I care about
+
+```
+
+## 5. Convert allele calls to gneoytpe data *(AA to 1, and BB to 0)*    
+
+```{r}
+
+# Function to turn AA to 1, BB to 0, AB to 0.5
+toAssignment <- function(dat) {
+  dat[dat == "AA"] <- as.numeric(1)
+  dat[dat == "BB"] <- as.numeric(0)
+  dat[dat == "AB"] <- as.numeric(0.5)
+  dat[dat == "BA"] <- as.numeric(0.5)
+  return(dat)
+}
+
+# Apply this function over columns
+Genotype.matrix <- apply(X = Genotype.matrix, MARGIN = 2, FUN = toAssignment)
+
+# Hold the Samples/SNPs
+These.Samples <- data.frame(colnames(Genotype.matrix))
+These.SNPs <- data.frame(rownames(Genotype.matrix))
+
+# Check the dimensions for futher reference (dum dum dum)
+#   dim(Genotype.matrix)
+#     278 x 803
+
+```
+
+## 6. Fix the dataset so that the values of 0 and 1 are numeric so that they can be better iterated over.    
+
+```{r}
+
+# Make values numeric...and flip dataset?
+Genotype.matrix <- apply(Genotype.matrix,1, as.numeric)
+#   dim(Genotype.matrix)
+#     803 x 278
+# Reassign col/row names
+rownames(Genotype.matrix) <- These.Samples$colnames.Genotype.matrix.
+colnames(Genotype.matrix) <- These.SNPs$rownames.Genotype.matrix.
+
+```
+
+## 7. Change the genotype values to reflect the minor allele count.    
+
+```{r}
+
+# Sum by columns to get minor/major alleles
+#   Find SNPs where the major allele is A
+major.A <- which((colSums(Genotype.matrix, na.rm = TRUE) / nrow(Genotype.matrix)) > 0.5)
+# Identify columns which this occurs
+cols.to.change <- which(colnames(Genotype.matrix) %in% names(major.A))
+# 1 - value
+Genotype.matrix[,cols.to.change] <- 1 - (Genotype.matrix[,cols.to.change])
+# Sanity check that there are no more >.5 values. 1 should be for minor alleles, thus the mean of a column should always be < 0.5
+  check <- which((colSums(Genotype.matrix, na.rm = TRUE) / 
+                    nrow(Genotype.matrix)) > 0.5)
+#   check
+
+```
+
+
+## 8. Remove any SNPs that aren't biallelic.   
+
+```{r}
+  
+# Use only biallelic SNPs
+Genotype.matrix <- Genotype.matrix[, colSums(Genotype.matrix == 0,na.rm=T) > 0  & colSums(Genotype.matrix == 1,na.rm=T) > 0 ] 
+#   None removed, all biallelic   
+
+```
+
+## 9. LD calculation by covariance (D).    
+
+```{r}
+  
+#LD between A and B: DAB = PAB - PAPB
+# Get covariance of all SNPs compared to my SNP
+  all.Cov <- apply(Genotype.matrix, 2, function(SNP){
+    cov(SNP,Genotype.matrix[,"X11_10380"] , use = "complete.obs")
+  })
+# Make dataset
+all.Cov <- as.data.frame(all.Cov)
+all.Cov$SNP <- rownames(all.Cov)
+rownames(all.Cov) <- 1:nrow(all.Cov)
+# Sort data to get the higest LD SNPs:
+largest.D <- order(all.Cov$all.Cov, decreasing = TRUE)[1:2] #71
+highest.Cov <- all.Cov[largest.D,]
+
+# Plot the data!
+# Plot histogram of data
+hist(all.Cov$all.Cov, 
+     xlab = "Covariance (D)",
+     xlim = c((min(all.Cov$all.Cov) - .1), 
+     (max(all.Cov$all.Cov) + .1)),
+     ylab = "Frequency",
+     main = "LD by Covariance",
+     border = "black",
+     col = "orange",
+     density = 40)
+# Plot points of highest LD SNPs
+points(x = highest.Cov$all.Cov, y = c(1,1), 
+       col = c("red","blue"), pch = 20)
+# Add a legend for these points
+legend("topright", c(highest.Cov$SNP[1], highest.Cov$SNP[2]),
+       col = c("red","blue"), pch = 20, 
+       title = "SNPs in highest LD", cex = 0.75)
+
+```
+
+What am I measuring:    
+LD: non-random association of two sites (A and B)    
+Meausred by covariance:    
+  - Equation: D = P(AB) - P(A)P(B)    
+  - PAB = probability that these SNPs occur together    
+  - PAPB = probability that A and B occur independently    
+  - if D = 0: sites are in linkage *equilibrium*
+
+
+
